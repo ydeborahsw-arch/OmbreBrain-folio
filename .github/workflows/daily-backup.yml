@@ -32,7 +32,7 @@ jobs:
           if [ -n "$ADMIN_TOKEN" ]; then
             AUTH_HEADER=(-H "X-Admin-Token: $ADMIN_TOKEN")
           fi
-          response=$(curl -sS -w "\n__HTTP_STATUS__:%{http_code}" \
+          response=$(curl -sS -X POST -w "\n__HTTP_STATUS__:%{http_code}" \
             "${AUTH_HEADER[@]}" \
             "${BACKUP_URL%/}/api/backup" \
             --max-time 120 \
