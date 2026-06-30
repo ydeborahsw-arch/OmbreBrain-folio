@@ -25,7 +25,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from utils import count_tokens_approx, now_iso
+from utils import count_tokens_approx, now_iso, get_ai_name
 
 logger = logging.getLogger("ombre_brain.import")
 
@@ -277,7 +277,7 @@ def chunk_turns(turns: list[dict], target_tokens: int = 10000) -> list[dict]:
     turn_count = 0
 
     for turn in turns:
-        role_label = "用户" if turn["role"] in ("user", "human") else "AI"
+        role_label = "用户" if turn["role"] in ("user", "human") else get_ai_name()
         # 嵌入时间戳前缀, 让 digest LLM 能给每条 item 推断准确的 event_time
         # 时间戳格式: [YYYY-MM-DD HH:MM]; 没时间戳的轮次跳过前缀
         ts_raw = turn.get("timestamp", "") or ""

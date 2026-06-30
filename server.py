@@ -50,7 +50,7 @@ from dehydrator import Dehydrator
 from decay_engine import DecayEngine
 from embedding_engine import EmbeddingEngine
 from import_memory import ImportEngine
-from utils import load_config, setup_logging, strip_wikilinks, count_tokens_approx, is_internalized, is_protected, is_highlighted
+from utils import load_config, setup_logging, strip_wikilinks, count_tokens_approx, is_internalized, is_protected, is_highlighted, get_ai_name
 
 # --- Load config & init logging / 加载配置 & 初始化日志 ---
 config = load_config()
@@ -3501,6 +3501,7 @@ async def api_config_get(request):
         "merge_threshold": config.get("merge_threshold", 75),
         "transport": config.get("transport", "stdio"),
         "buckets_dir": config.get("buckets_dir", ""),
+        "ai_name": get_ai_name(),
     })
 
 

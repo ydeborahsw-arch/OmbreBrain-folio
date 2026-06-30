@@ -250,6 +250,10 @@ def normalize_event_time(s):
         return None
 
 
+def get_ai_name() -> str:
+    return os.environ.get("AI_NAME", "").strip() or "AI"
+
+
 def is_protected(meta: dict) -> bool:
     """读"防自动衰减归档"标记,兼容旧字段名 `pinned`。
     优先用新字段 `protected`,完全没设过才退回旧字段 `pinned`。
