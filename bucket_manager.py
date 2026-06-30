@@ -965,6 +965,11 @@ class BucketManager:
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(frontmatter.dumps(post))
             self._move_bucket(file_path, self.permanent_dir, domain)
+        elif "protected" in kwargs and not kwargs["protected"] and post.get("type") == "permanent":
+            post["type"] = "dynamic"
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(frontmatter.dumps(post))
+            self._move_bucket(file_path, self.dynamic_dir, domain)
         elif ("resolved" in kwargs and not kwargs["resolved"]) and post.get("type") == "archived":
             # 取消归档(取消噪声 / 取消 resolved): 把桶从 archive/ 真搬回 dynamic/,
             # 重新参与浮现与检索。否则只清了 resolved 标记、恢复了 importance 数值,

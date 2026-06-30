@@ -243,9 +243,26 @@ class DecayEngine:
         checked = 0
         archived = 0
         lowest_score = float("inf")
+        demoted_orphans = 0
 
         for bucket in buckets:
             meta = bucket.get("metadata", {})
+
+            # --- Self-heal: 孤儿固化桶（type==permanent 却没 protected）---
+            # 早期 unprotect 只翻 protected 标记、没把 type 降级回 dynamic 的历史遗留。
+            # 这类桶 calculate_score 恒返 999（权重卡死、永不衰减、永远霸占召回置顶）。
+            # 后台衰减循环每轮扫全库，顺手把孤儿对称降级回 dynamic。
+            if meta.get("type") == "permanent" and not is_protected(meta):
+                try:
+                    await self.bucket_mgr.update(bucket["id"], protected=False)
+                    demoted_orphans += 1
+                    logger.info(
+                        f"Decay self-heal / 自愈降级孤儿固化桶: "
+                        f"{meta.get('name', bucket['id'])} ({bucket['id']})"
+                    )
+                except Exception as e:
+                    logger.warning(f"Decay self-heal failed / 自愈降级失败 {bucket.get('id', '?')}: {e}")
+                continue
 
             # Skip permanent / feel / protected buckets
             # 跳过固化桶、feel 桶(心动时刻防遗忘)、保护桶(防衰减)。
@@ -294,6 +311,7 @@ class DecayEngine:
             "checked": checked,
             "archived": archived,
             "lowest_score": lowest_score if checked > 0 else 0,
+            "demoted_orphans": demoted_orphans,
         }
         logger.info(f"Decay cycle complete / 衰减周期完成: {result}")
         return result

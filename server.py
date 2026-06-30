@@ -2710,7 +2710,7 @@ async def api_embeddings_backfill(request):
     if not embedding_engine or not embedding_engine.enabled:
         return JSONResponse({"error": "embedding 未启用,检查 OMBRE_EMBED_API_KEY"}, status_code=400)
 
-    all_buckets = await bucket_mgr.list_all(include_archive=False)
+    all_buckets = await bucket_mgr.list_all(include_archive=True)
     missing = []
     for b in all_buckets:
         if await embedding_engine.get_embedding(b["id"]) is None:
@@ -2720,7 +2720,7 @@ async def api_embeddings_backfill(request):
     failed = 0
     skipped = 0
     errors = []
-    for b in missing:
+    for idx, b in enumerate(missing):
         content = (b.get("content") or "").strip()
         if not content:
             skipped += 1
@@ -2733,7 +2733,10 @@ async def api_embeddings_backfill(request):
             failed += 1
             errors.append(f"{b['id'][:12]}: {str(e)[:120]}")
             if len(errors) > 5:
-                break  # 早停 — 大概率配置问题
+                break
+        if (idx + 1) % 20 == 0:
+            import asyncio as _aio
+            await _aio.sleep(2)
     return JSONResponse({
         "total_missing": len(missing),
         "success": success,
