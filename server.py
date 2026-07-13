@@ -98,6 +98,9 @@ mcp = FastMCP(
 async def health_check(request):
     from starlette.responses import JSONResponse
     try:
+        # 衰减引擎原本懒启动(breath/hold才拉起):容器重启后若只有trace/pulse调用,
+        # 引擎一直停着→权重不衰减、自动归档不跑。保活线程每60s ping这里,顺路拉起+自愈。
+        await decay_engine.ensure_started()
         stats = await bucket_mgr.get_stats()
         return JSONResponse({
             "status": "ok",
