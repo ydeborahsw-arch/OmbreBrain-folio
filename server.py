@@ -37,6 +37,7 @@ import random
 import logging
 import asyncio
 import httpx
+from datetime import datetime, timezone, timedelta
 
 
 # --- Ensure same-directory modules can be imported ---
@@ -343,12 +344,48 @@ async def breath(
     domain: str = "",
     valence: float = -1,
     arousal: float = -1,
-    max_results: int = 20,
+    max_results: int = 8,
+    recent_days: int = 0,
 ) -> str:
-    """检索/浮现记忆。不传query或传空=自动浮现,有query=关键词检索。max_tokens控制返回总token上限(默认10000)。domain逗号分隔,valence/arousal 0~1(-1忽略)。max_results控制返回数量上限(默认20,最大50)。"""
+    """检索/浮现记忆。不传query或传空=自动浮现,有query=关键词检索。recent_days>0=最近回放:按时间倒序返回最近N天的桶(醒来接续用,忽略query)。max_tokens控制返回总token上限(默认10000)。domain逗号分隔,valence/arousal 0~1(-1忽略)。max_results控制返回数量上限(默认8,最大50)。"""
     await decay_engine.ensure_started()
     max_results = min(max_results, 50)
     max_tokens = min(max_tokens, 20000)
+
+    # --- Recent replay: time-ordered recall of the last N days ---
+    # --- 最近回放:按时间倒序看最近N天(权重浮现看不到的新鲜事,醒来接续她用) ---
+    if recent_days and recent_days > 0:
+        try:
+            all_buckets = await bucket_mgr.list_all(include_archive=False)
+        except Exception as e:
+            logger.error(f"Recent replay failed to list buckets: {e}")
+            return "记忆系统暂时无法访问。"
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=recent_days)).isoformat()
+        recent_bs = [
+            b for b in all_buckets
+            if not is_internalized(b["metadata"])
+            and b["metadata"].get("type") != "feel"
+            and str(b["metadata"].get("updated") or b["metadata"].get("created") or "") >= cutoff
+        ]
+        recent_bs.sort(key=lambda b: str(b["metadata"].get("updated") or b["metadata"].get("created") or ""), reverse=True)
+        recent_bs = recent_bs[:max_results]
+        if not recent_bs:
+            return f"最近 {recent_days} 天没有新的记忆。"
+        out, used = [], 0
+        for b in recent_bs:
+            try:
+                clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
+                summary = await dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
+                t = count_tokens_approx(summary)
+                if used + t > max_tokens:
+                    break
+                stamp = str(b["metadata"].get("updated") or b["metadata"].get("created") or "")[:16]
+                out.append(f"[{stamp}] [bucket_id:{b['id']}] {summary}")
+                used += t
+            except Exception as e:
+                logger.warning(f"Recent replay dehydrate failed: {e}")
+                continue
+        return f"=== 最近 {recent_days} 天(新→旧) ===\n" + "\n---\n".join(out)
 
     # --- No args or empty query: surfacing mode (weight pool active push) ---
     # --- 无参数或空query：浮现模式（权重池主动推送）---
@@ -769,7 +806,29 @@ async def hold(
     )
 
     action = "合并→" if is_merged else "新建→"
-    return f"{action}{result_name} {','.join(domain)}"
+    result = f"{action}{result_name} {','.join(domain)}"
+
+    # --- Semantic dedupe hint: newly created bucket that closely matches an old one ---
+    # --- 语义查重提示:新建桶若与旧桶高度相似,提示考虑 grow 追加/合并,防同一件事碎成多桶 ---
+    if not is_merged:
+        try:
+            similar = await embedding_engine.search_similar(content, top_k=3)
+            hints = []
+            for sid, sim in similar:
+                if sim < 0.78 or sid == result_name:
+                    continue
+                sb = await bucket_mgr.get(sid)
+                if not sb or is_internalized(sb.get("metadata", {})) or sb.get("metadata", {}).get("type") == "feel":
+                    continue
+                sname = sb.get("metadata", {}).get("name", sid)
+                hints.append(f"「{sname}」(bucket_id:{sid}, 相似{sim:.0%})")
+                if len(hints) >= 2:
+                    break
+            if hints:
+                result += "\n⚠ 有相近的旧桶: " + "、".join(hints) + " ——同一件事考虑 trace(merge) 或先查旧桶再补充。"
+        except Exception:
+            pass
+    return result
 
 
 # =============================================================
@@ -901,10 +960,25 @@ async def trace(
     content: str = "",
     delete: bool = False,
 ) -> str:
-    """修改记忆元数据或内容。resolved=1归档(移入归档区→不再浮现、也不再被检索;可在 dashboard 归档区查看/恢复)/0取消归档标记,protected=1防衰减/0取消,highlight=1浮现优先/0取消,internalized=1隐藏(留在原地但不浮现/不检索)/0取消,event_time=纠正事件实际发生时间(YYYY-MM-DD 或 ISO,空字符串=清除该字段),content=替换桶正文,delete=True删除。只传需改的,-1或空=不改。pinned 是 protected+highlight 的旧组合别名;digested 是 internalized 旧名,仍可用。"""
+    """修改记忆元数据或内容。bucket_id支持逗号分隔多个ID批量操作(批量时content/name/event_time被忽略)。resolved=1归档(移入归档区→不再浮现、也不再被检索;可在 dashboard 归档区查看/恢复)/0取消归档标记,protected=1防衰减/0取消,highlight=1浮现优先/0取消,internalized=1隐藏(留在原地但不浮现/不检索)/0取消,event_time=纠正事件实际发生时间(YYYY-MM-DD 或 ISO,空字符串=清除该字段),content=替换桶正文,delete=True删除。只传需改的,-1或空=不改。pinned 是 protected+highlight 的旧组合别名;digested 是 internalized 旧名,仍可用。"""
 
     if not bucket_id or not bucket_id.strip():
         return "请提供有效的 bucket_id。"
+
+    # --- Batch mode: comma-separated ids → apply metadata ops to each ---
+    # --- 批量:逗号分隔多个id,对每个执行相同的元数据操作(content/name/event_time 单桶专属,批量忽略) ---
+    if "," in bucket_id:
+        ids = [i.strip() for i in bucket_id.split(",") if i.strip()]
+        outs = []
+        for one in ids:
+            r = await trace(
+                bucket_id=one, domain=domain, valence=valence, arousal=arousal,
+                importance=importance, tags=tags, resolved=resolved,
+                protected=protected, highlight=highlight, pinned=pinned,
+                internalized=internalized, digested=digested, delete=delete,
+            )
+            outs.append(f"{one}: {r}")
+        return "\n".join(outs)
 
     # --- 闸门:用户手写的桶,AI 没权限改/删/归档 ---
     # --- created_by="user" 是 dashboard 新建桶时打的标记,代表"这是用户手写的事实",
@@ -1002,8 +1076,8 @@ async def trace(
 # 工具 5：pulse — 脉搏，系统状态 + 记忆列表
 # =============================================================
 @mcp.tool()
-async def pulse(include_archive: bool = False) -> str:
-    """查看系统状态 + 记忆桶列表。仅当用户主动问起"你都记得什么 / 记忆系统状态"时才调用,别在普通对话里随手调。include_archive=True 含归档。"""
+async def pulse(include_archive: bool = False, show_all: bool = False) -> str:
+    """查看系统状态 + 记忆桶列表。仅当用户主动问起"你都记得什么 / 记忆系统状态"时才调用,别在普通对话里随手调。默认只显示钉选桶+权重前15的动态桶(省token);show_all=True返回全部。include_archive=True 含归档。"""
     try:
         stats = await bucket_mgr.get_stats()
     except Exception as e:
@@ -1026,6 +1100,23 @@ async def pulse(include_archive: bool = False) -> str:
 
     if not buckets:
         return status + "\n记忆库为空。"
+
+    # --- Default: pinned/protected + top-15 dynamic by weight (token diet) ---
+    # --- 默认瘦身:钉选/永久桶全部 + 动态桶按权重前15;show_all=True 才吐全量 ---
+    hidden_count = 0
+    if not show_all:
+        def _is_pinned_row(m):
+            return bool(m.get("pinned") or m.get("protected") or m.get("highlight"))
+        pinned_rows = [b for b in buckets if _is_pinned_row(b.get("metadata", {}))]
+        dynamic_rows = [b for b in buckets if not _is_pinned_row(b.get("metadata", {}))]
+        def _row_score(b):
+            try:
+                return decay_engine.calculate_score(b.get("metadata", {}))
+            except Exception:
+                return 0.0
+        dynamic_rows.sort(key=_row_score, reverse=True)
+        hidden_count = max(0, len(dynamic_rows) - 15)
+        buckets = pinned_rows + dynamic_rows[:15]
 
     lines = []
     for b in buckets:
@@ -1060,7 +1151,8 @@ async def pulse(include_archive: bool = False) -> str:
             f"标签:{','.join(meta.get('tags', []))}"
         )
 
-    return status + "\n=== 记忆列表 ===\n" + "\n".join(lines)
+    tail = f"\n…还有 {hidden_count} 个低权重动态桶未显示(show_all=True 查看)" if hidden_count else ""
+    return status + "\n=== 记忆列表 ===\n" + "\n".join(lines) + tail
 
 
 # =============================================================
@@ -1191,6 +1283,45 @@ async def dream() -> str:
             logger.warning(f"Dream crystallization hint failed: {e}")
 
     return header + "\n---\n".join(parts) + connection_hint + crystal_hint
+
+
+# =============================================================
+# Tool: todos — 未完成事项汇总
+# 扫描所有未归档、未解决桶 content 里的 todos 字段,按桶分组列出。
+# 解决"待办散落在各桶里,过两天就没人记得"的问题。
+# =============================================================
+@mcp.tool()
+async def todos() -> str:
+    """汇总所有未完结记忆桶里的待办事项(todos字段),按桶分组,附桶名和重要度。想知道"还有什么事没办"时用。"""
+    import json as _json_td
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=False)
+    except Exception as e:
+        return f"记忆系统暂时无法访问: {e}"
+    groups = []
+    for b in all_buckets:
+        meta = b.get("metadata", {})
+        if meta.get("resolved", False) or is_internalized(meta) or meta.get("type") == "feel":
+            continue
+        items = []
+        raw = b.get("content") or ""
+        # content 多为脱水JSON(含todos数组);宽容解析,非JSON就跳过
+        try:
+            start = raw.find("{")
+            data = _json_td.loads(raw[start:]) if start >= 0 else {}
+            items = [str(t).strip() for t in (data.get("todos") or []) if str(t).strip()]
+        except Exception:
+            continue
+        if items:
+            groups.append((meta.get("importance", 5), meta.get("name", b["id"]), b["id"], items))
+    if not groups:
+        return "没有待办事项,都办完了。"
+    groups.sort(key=lambda g: g[0], reverse=True)
+    parts = []
+    for imp, name, bid, items in groups:
+        rows = "\n".join(f"  - {t}" for t in items)
+        parts.append(f"[{name}] (重要:{imp}, bucket_id:{bid})\n{rows}")
+    return "=== 未完成事项 ===\n" + "\n".join(parts)
 
 
 # =============================================================
