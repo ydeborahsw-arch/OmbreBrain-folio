@@ -961,11 +961,55 @@ async def trace(
     event_time: str = "",
     content: str = "",
     delete: bool = False,
+    merge: str = "",
 ) -> str:
-    """修改记忆元数据或内容。bucket_id支持逗号分隔多个ID批量操作(批量时content/name/event_time被忽略)。resolved=1归档(移入归档区→不再浮现、也不再被检索;可在 dashboard 归档区查看/恢复)/0取消归档标记,protected=1防衰减/0取消,highlight=1浮现优先/0取消,internalized=1隐藏(留在原地但不浮现/不检索)/0取消,event_time=纠正事件实际发生时间(YYYY-MM-DD 或 ISO,空字符串=清除该字段),content=替换桶正文,delete=True删除。只传需改的,-1或空=不改。pinned 是 protected+highlight 的旧组合别名;digested 是 internalized 旧名,仍可用。"""
+    """修改记忆元数据或内容。bucket_id支持逗号分隔多个ID批量操作(批量时content/name/event_time被忽略)。merge=目标bucket_id:把当前桶内容并入目标桶(内容追加、标签去重、importance取大、情感取平均),当前桶删除;merge不能对钉选桶使用。resolved=1归档(移入归档区→不再浮现、也不再被检索;可在 dashboard 归档区查看/恢复)/0取消归档标记,protected=1防衰减/0取消,highlight=1浮现优先/0取消,internalized=1隐藏(留在原地但不浮现/不检索)/0取消,event_time=纠正事件实际发生时间(YYYY-MM-DD 或 ISO,空字符串=清除该字段),content=替换桶正文,delete=True删除。只传需改的,-1或空=不改。pinned 是 protected+highlight 的旧组合别名;digested 是 internalized 旧名,仍可用。"""
 
     if not bucket_id or not bucket_id.strip():
         return "请提供有效的 bucket_id。"
+
+    # --- Merge mode: fold this bucket into target, delete source ---
+    # --- 合并:当前桶(源)并入 merge 指定的目标桶,源桶删除。她点的单:同主题碎片收拢 ---
+    if merge and merge.strip():
+        target_id = merge.strip()
+        if "," in bucket_id:
+            return "merge 模式不支持批量源桶,一次合一个。"
+        if target_id == bucket_id:
+            return "源桶和目标桶相同,无需合并。"
+        src = await bucket_mgr.get(bucket_id)
+        tgt = await bucket_mgr.get(target_id)
+        if not src:
+            return f"未找到源桶: {bucket_id}"
+        if not tgt:
+            return f"未找到目标桶: {target_id}"
+        sm, tm = src.get("metadata", {}), tgt.get("metadata", {})
+        if sm.get("created_by") == "user" or tm.get("created_by") == "user":
+            return "涉及用户手写桶,没有合并权限。"
+        if is_protected(sm) or is_highlighted(sm) or sm.get("pinned"):
+            return "源桶是钉选/永久参考桶,不能被合并吞掉。想合并请先取消钉选。"
+        try:
+            merged_content = (tgt.get("content") or "").rstrip() + "\n\n--- 并入自「" + (
+                sm.get("name") or bucket_id) + "」 ---\n" + (src.get("content") or "").strip()
+            merged_tags = list(dict.fromkeys((tm.get("tags") or []) + (sm.get("tags") or [])))
+            upd = {
+                "content": merged_content,
+                "tags": merged_tags,
+                "importance": max(int(tm.get("importance", 5)), int(sm.get("importance", 5))),
+                "valence": round((float(tm.get("valence", 0.5)) + float(sm.get("valence", 0.5))) / 2, 2),
+                "arousal": round((float(tm.get("arousal", 0.3)) + float(sm.get("arousal", 0.3))) / 2, 2),
+            }
+            await bucket_mgr.update(target_id, **upd)
+            try:
+                await embedding_engine.generate_and_store(target_id, merged_content)
+            except Exception:
+                pass
+            ok = await bucket_mgr.delete(bucket_id)
+            if ok:
+                embedding_engine.delete_embedding(bucket_id)
+            return f"已合并: {sm.get('name') or bucket_id} → {tm.get('name') or target_id}(源桶已删)"
+        except Exception as e:
+            logger.error(f"Merge failed: {e}")
+            return f"合并失败: {e}"
 
     # --- Batch mode: comma-separated ids → apply metadata ops to each ---
     # --- 批量:逗号分隔多个id,对每个执行相同的元数据操作(content/name/event_time 单桶专属,批量忽略) ---
