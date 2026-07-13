@@ -43,7 +43,7 @@ class DecayEngine:
     # 前端"恢复默认"按钮回到这套值
     # ---------------------------------------------------------
     DEFAULTS = {
-        "feel_score": 50.0,            # feel 桶基础权重 (锁定值, 防"心动时刻"被自然遗忘); 设 0 → 跟随 importance 公式
+        "feel_score": 15.0,            # feel 桶基础权重 (锁定值, 防"心动时刻"被自然遗忘); 设 0 → 跟随 importance 公式。原50太霸道:任何按权重排序的列表都被feel垄断,正常记忆挤不上来,降到15
         "protected_score": 999.0,      # protected/permanent 桶分数 (对齐上游; 实质=永不衰减, 999 与 100 功能等价)
         "highlight_boost_pct": 30.0,   # highlight=true 时 score *= (1 + pct/100)
         "surface_threshold": 5.0,      # score 高于此值 → 标记为"活跃" (UI 提示用)

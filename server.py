@@ -1102,13 +1102,17 @@ async def pulse(include_archive: bool = False, show_all: bool = False) -> str:
         return status + "\n记忆库为空。"
 
     # --- Default: pinned/protected + top-15 dynamic by weight (token diet) ---
-    # --- 默认瘦身:钉选/永久桶全部 + 动态桶按权重前15;show_all=True 才吐全量 ---
+    # --- 默认瘦身:钉选/永久桶全部 + 动态桶按权重前15;show_all=True 才吐全量。
+    #     feel桶不抢动态位(它们权重固定、数量多,会垄断top15),单独计数 ---
     hidden_count = 0
+    feel_count = 0
     if not show_all:
         def _is_pinned_row(m):
             return bool(m.get("pinned") or m.get("protected") or m.get("highlight"))
         pinned_rows = [b for b in buckets if _is_pinned_row(b.get("metadata", {}))]
-        dynamic_rows = [b for b in buckets if not _is_pinned_row(b.get("metadata", {}))]
+        rest = [b for b in buckets if not _is_pinned_row(b.get("metadata", {}))]
+        feel_count = sum(1 for b in rest if b.get("metadata", {}).get("type") == "feel")
+        dynamic_rows = [b for b in rest if b.get("metadata", {}).get("type") != "feel"]
         def _row_score(b):
             try:
                 return decay_engine.calculate_score(b.get("metadata", {}))
@@ -1151,7 +1155,11 @@ async def pulse(include_archive: bool = False, show_all: bool = False) -> str:
             f"标签:{','.join(meta.get('tags', []))}"
         )
 
-    tail = f"\n…还有 {hidden_count} 个低权重动态桶未显示(show_all=True 查看)" if hidden_count else ""
+    tail = ""
+    if hidden_count:
+        tail += f"\n…还有 {hidden_count} 个低权重动态桶未显示(show_all=True 查看)"
+    if feel_count:
+        tail += f"\n🫧 feel桶 {feel_count} 个未列出(breath(domain=\"feel\") 查看)"
     return status + "\n=== 记忆列表 ===\n" + "\n".join(lines) + tail
 
 
